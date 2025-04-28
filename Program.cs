@@ -1,3 +1,2 @@
-﻿
-using var game = new ArcadeButtons.Game1();
+﻿using var game = new SimplifiedGame.Game1();
 game.Run();
