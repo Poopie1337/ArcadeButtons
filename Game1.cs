@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.IO;
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
 using Microsoft.Xna.Framework.Input;
@@ -102,6 +103,11 @@ namespace SimplifiedGame
         // Camera for the game view
         private Camera2D camera;
 
+        // Fullscreen support
+        private bool isFullscreen = true; // Start in fullscreen by default
+        private int windowedWidth = 1366;
+        private int windowedHeight = 768;
+
         public Game1()
         {
             _graphics = new GraphicsDeviceManager(this);
@@ -111,19 +117,61 @@ namespace SimplifiedGame
 
         protected override void Initialize()
         {
-            // Set screen size
-            _graphics.PreferredBackBufferWidth = 1366;
-            _graphics.PreferredBackBufferHeight = 768;
+            // Configure initial graphics settings
+            SetGraphicsMode(isFullscreen);
+
+            // Initialize camera
+            camera = new Camera2D(GraphicsDevice.Viewport);
+
+            base.Initialize();
+        }
+
+        private void SetGraphicsMode(bool fullscreen)
+        {
+            if (fullscreen)
+            {
+                // Get the current display mode for fullscreen
+                var displayMode = GraphicsDevice.Adapter.CurrentDisplayMode;
+                _graphics.IsFullScreen = true;
+                _graphics.PreferredBackBufferWidth = displayMode.Width;
+                _graphics.PreferredBackBufferHeight = displayMode.Height;
+            }
+            else
+            {
+                // Use windowed mode
+                _graphics.IsFullScreen = false;
+                _graphics.PreferredBackBufferWidth = windowedWidth;
+                _graphics.PreferredBackBufferHeight = windowedHeight;
+            }
+
             _graphics.ApplyChanges();
 
             // Store screen dimensions
             screenWidth = _graphics.PreferredBackBufferWidth;
             screenHeight = _graphics.PreferredBackBufferHeight;
 
-            // Initialize camera
-            camera = new Camera2D(GraphicsDevice.Viewport);
+            Console.WriteLine($"[Game] Display mode: {(fullscreen ? "Fullscreen" : "Windowed")} {screenWidth}x{screenHeight}");
 
-            base.Initialize();
+            // Update zoom if map is loaded
+            if (tileMap != null)
+            {
+                SetOptimalZoom();
+            }
+        }
+
+        private void UpdateStartButtonPosition()
+        {
+            // Set start button position (center of screen for menu)
+            // Scale button size based on screen resolution
+            int buttonWidth = Math.Min(300, screenWidth / 4);
+            int buttonHeight = Math.Min(80, screenHeight / 12);
+
+            startButtonRect = new Rectangle(
+                screenWidth / 2 - buttonWidth / 2,
+                screenHeight / 2 - buttonHeight / 2,
+                buttonWidth,
+                buttonHeight
+            );
         }
 
         protected override void LoadContent()
@@ -135,7 +183,27 @@ namespace SimplifiedGame
 
             // Load the Tiled map
             tileMap = new TileMap();
-            tileMap.LoadContent(Content, "GameMap");
+
+            // Add debug information
+            Console.WriteLine("Loading map: Testkarta");
+            string mapPath = Path.Combine(Content.RootDirectory, "Testkarta.tmx");
+            Console.WriteLine($"Map path: {mapPath}");
+            Console.WriteLine($"File exists: {File.Exists(mapPath)}");
+
+            try
+            {
+                tileMap.LoadContent(Content, "Testkarta");
+                Console.WriteLine($"Map loaded successfully! Size: {tileMap.WidthInPixels}x{tileMap.HeightInPixels} pixels");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error loading map: {ex.Message}");
+                Console.WriteLine($"Stack trace: {ex.StackTrace}");
+                throw; // Re-throw to see the error
+            }
+
+            // Set optimal camera zoom based on screen size and map size
+            SetOptimalZoom();
 
             // Set campfire position to center of the map
             campfirePosition = new Vector2(tileMap.WidthInPixels / 2, tileMap.HeightInPixels / 2);
@@ -153,17 +221,12 @@ namespace SimplifiedGame
             grayOverlayTexture = new Texture2D(GraphicsDevice, 1, 1);
             grayOverlayTexture.SetData(new[] { new Color((byte)128, (byte)128, (byte)128, (byte)128) });
 
-            // Create a start button texture
+            // Create start button texture
             startButtonTexture = new Texture2D(GraphicsDevice, 1, 1);
             startButtonTexture.SetData(new[] { Color.White });
 
-            // Set start button position (center of screen for menu)
-            startButtonRect = new Rectangle(
-                screenWidth / 2 - 150,
-                screenHeight / 2 - 40,
-                300,
-                80
-            );
+            // Set start button position
+            UpdateStartButtonPosition();
 
             // Create players with different colors in their respective corners
             Color[] playerColors = { Color.Red, Color.Green, Color.Blue, Color.Yellow };
@@ -194,6 +257,65 @@ namespace SimplifiedGame
         {
             if (Keyboard.GetState().IsKeyDown(Keys.Escape))
                 Exit();
+
+            // Toggle fullscreen with Alt+Enter or F11
+            if (InputManager.IsKeyPressed(Keys.F11) ||
+                (InputManager.IsKeyPressed(Keys.Enter) && (InputManager.IsKeyDown(Keys.LeftAlt) || InputManager.IsKeyDown(Keys.RightAlt))))
+            {
+                isFullscreen = !isFullscreen;
+                SetGraphicsMode(isFullscreen);
+
+                // Update the camera viewport after resolution change
+                camera = new Camera2D(GraphicsDevice.Viewport);
+
+                // Update UI positions after resolution change
+                UpdateStartButtonPosition();
+
+                // Recalculate optimal zoom for new resolution
+                if (tileMap != null)
+                {
+                    SetOptimalZoom();
+                    // Reset camera position to center
+                    camera.Position = campfirePosition;
+                }
+            }
+
+            // Zoom mode controls (F keys)
+            if (InputManager.IsKeyPressed(Keys.F2))
+            {
+                currentZoomMode = ZoomMode.FitMap;
+                SetOptimalZoom();
+                Console.WriteLine("[Camera] Switched to FitMap mode - Entire map visible");
+            }
+            else if (InputManager.IsKeyPressed(Keys.F3))
+            {
+                currentZoomMode = ZoomMode.FillScreen;
+                SetOptimalZoom();
+                Console.WriteLine("[Camera] Switched to FillScreen mode - No black bars");
+            }
+            else if (InputManager.IsKeyPressed(Keys.F4))
+            {
+                currentZoomMode = ZoomMode.FixedZoom;
+                SetOptimalZoom();
+                Console.WriteLine($"[Camera] Switched to FixedZoom mode - Zoom level: {fixedZoomLevel}");
+            }
+
+            // Manual zoom controls (+ and - keys)
+            if (currentZoomMode == ZoomMode.FixedZoom)
+            {
+                if (InputManager.IsKeyPressed(Keys.OemPlus) || InputManager.IsKeyPressed(Keys.Add))
+                {
+                    fixedZoomLevel = Math.Min(fixedZoomLevel + 0.5f, 10.0f);
+                    SetOptimalZoom();
+                    Console.WriteLine($"[Camera] Zoom increased to {fixedZoomLevel}");
+                }
+                else if (InputManager.IsKeyPressed(Keys.OemMinus) || InputManager.IsKeyPressed(Keys.Subtract))
+                {
+                    fixedZoomLevel = Math.Max(fixedZoomLevel - 0.5f, 0.5f);
+                    SetOptimalZoom();
+                    Console.WriteLine($"[Camera] Zoom decreased to {fixedZoomLevel}");
+                }
+            }
 
             // Update input manager
             InputManager.Update();
@@ -261,6 +383,46 @@ namespace SimplifiedGame
 
             // Make sure camera doesn't show beyond map bounds
             camera.LimitToBounds(0, 0, tileMap.WidthInPixels, tileMap.HeightInPixels);
+        }
+
+        // Zoom behavior options
+        public enum ZoomMode
+        {
+            FitMap,        // Entire map visible, may have black bars
+            FillScreen,    // No black bars, map may be cut off
+            FixedZoom      // Use a fixed zoom level
+        }
+
+        private ZoomMode currentZoomMode = ZoomMode.FillScreen;
+        private float fixedZoomLevel = 3.0f; // Used when ZoomMode is FixedZoom
+
+        private void SetOptimalZoom()
+        {
+            float scaleX = screenWidth / (float)tileMap.WidthInPixels;
+            float scaleY = screenHeight / (float)tileMap.HeightInPixels;
+
+            switch (currentZoomMode)
+            {
+                case ZoomMode.FitMap:
+                    // Show entire map, may have black bars
+                    camera.Zoom = Math.Min(scaleX, scaleY) * 0.95f;
+                    break;
+
+                case ZoomMode.FillScreen:
+                    // Fill screen completely, map may be cut off
+                    camera.Zoom = Math.Max(scaleX, scaleY);
+                    break;
+
+                case ZoomMode.FixedZoom:
+                    // Use a fixed zoom level
+                    camera.Zoom = fixedZoomLevel;
+                    break;
+            }
+
+            // Set minimum zoom so the game doesn't get too small
+            camera.Zoom = Math.Max(camera.Zoom, 1.0f);
+
+            Console.WriteLine($"[Camera] {currentZoomMode} - Set zoom to {camera.Zoom:F2} (Screen: {screenWidth}x{screenHeight}, Map: {tileMap.WidthInPixels}x{tileMap.HeightInPixels})");
         }
 
         private void UpdateMenu(GameTime gameTime)
@@ -900,7 +1062,8 @@ namespace SimplifiedGame
 
         protected override void Draw(GameTime gameTime)
         {
-            GraphicsDevice.Clear(Color.Black);
+            // Use a dark forest green background instead of black
+            GraphicsDevice.Clear(new Color(20, 40, 20));
 
             // For gameplay and upgrading, use camera transform
             if (currentState == GameState.Playing)
@@ -1018,7 +1181,7 @@ namespace SimplifiedGame
                 fontRenderer.DrawTextCentered(
                     _spriteBatch,
                     "MOVE: LEFT STICK/WASD - SHOOT: TRIGGER/SPACE",
-                    new Vector2(screenWidth / 2, screenHeight - 50),
+                    new Vector2(screenWidth / 2, screenHeight - 70),
                     Color.White,
                     1.0f
                 );
@@ -1027,9 +1190,23 @@ namespace SimplifiedGame
                 fontRenderer.DrawTextCentered(
                     _spriteBatch,
                     "AUTO-AIM: SHOOTS IN MOVEMENT DIRECTION",
-                    new Vector2(screenWidth / 2, screenHeight - 20),
+                    new Vector2(screenWidth / 2, screenHeight - 40),
                     Color.White,
                     1.0f
+                );
+
+                // Show current zoom mode and controls
+                string zoomInfo = $"ZOOM: {currentZoomMode} ({camera.Zoom:F1}x) - F2: FIT MAP | F3: FILL SCREEN | F4: FIXED ZOOM";
+                if (currentZoomMode == ZoomMode.FixedZoom)
+                {
+                    zoomInfo += " | +/-: ADJUST";
+                }
+                fontRenderer.DrawTextCentered(
+                    _spriteBatch,
+                    zoomInfo,
+                    new Vector2(screenWidth / 2, screenHeight - 10),
+                    Color.Gray,
+                    0.8f
                 );
 
                 _spriteBatch.End();
@@ -1075,9 +1252,18 @@ namespace SimplifiedGame
             fontRenderer.DrawTextCentered(
                 _spriteBatch,
                 "PRESS A TO JOIN/LEAVE - GREEN PLAYER'S R2 OR SPACE TO START",
-                new Vector2(screenWidth / 2, screenHeight - 50),
+                new Vector2(screenWidth / 2, screenHeight - 80),
                 Color.White,
                 1.0f
+            );
+
+            // Draw fullscreen toggle instruction
+            fontRenderer.DrawTextCentered(
+                _spriteBatch,
+                "F11 OR ALT+ENTER: TOGGLE FULLSCREEN",
+                new Vector2(screenWidth / 2, screenHeight - 40),
+                Color.Gray,
+                0.8f
             );
 
             // Draw campfire in the middle
@@ -1486,9 +1672,34 @@ namespace SimplifiedGame
             float halfScreenWidth = viewport.Width / (2 * zoom);
             float halfScreenHeight = viewport.Height / (2 * zoom);
 
-            // Limit camera position to prevent showing beyond map edges
-            position.X = MathHelper.Clamp(position.X, minX + halfScreenWidth, maxX - halfScreenWidth);
-            position.Y = MathHelper.Clamp(position.Y, minY + halfScreenHeight, maxY - halfScreenHeight);
+            // Calculate how much extra space we have if the zoomed map is larger than the screen
+            float zoomedMapWidth = maxX * zoom;
+            float zoomedMapHeight = maxY * zoom;
+
+            if (zoomedMapWidth > viewport.Width && zoomedMapHeight > viewport.Height)
+            {
+                // If the map is larger than the screen in both dimensions, use normal limiting
+                position.X = MathHelper.Clamp(position.X, minX + halfScreenWidth, maxX - halfScreenWidth);
+                position.Y = MathHelper.Clamp(position.Y, minY + halfScreenHeight, maxY - halfScreenHeight);
+            }
+            else if (zoomedMapWidth > viewport.Width)
+            {
+                // Map is wider than screen but not taller - center vertically, limit horizontally
+                position.X = MathHelper.Clamp(position.X, minX + halfScreenWidth, maxX - halfScreenWidth);
+                position.Y = maxY / 2f; // Center on map
+            }
+            else if (zoomedMapHeight > viewport.Height)
+            {
+                // Map is taller than screen but not wider - center horizontally, limit vertically
+                position.X = maxX / 2f; // Center on map
+                position.Y = MathHelper.Clamp(position.Y, minY + halfScreenHeight, maxY - halfScreenHeight);
+            }
+            else
+            {
+                // Map fits entirely on screen - center it
+                position.X = maxX / 2f;
+                position.Y = maxY / 2f;
+            }
 
             // Update the transformation matrix with the new position
             UpdateMatrix();

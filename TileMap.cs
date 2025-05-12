@@ -4,29 +4,30 @@ using Microsoft.Xna.Framework.Graphics;
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.IO.Compression;
 using System.Xml.Linq;
 
 namespace SimplifiedGame
 {
+    /// <summary>
+    /// Loads, renders and provides collision for a TMX map exported from Tiled.
+    /// Supports CSV, Base‑64, Base‑64 + gzip and Base‑64 + zlib layer encodings.
+    /// </summary>
     public class TileMap
     {
-        // Map properties
-        private int width;
-        private int height;
-        private int tileWidth;
-        private int tileHeight;
+        // ───────────────────────────────────────── fields ─────────────────────────────────────────
+        private int width, height;           // tile counts
+        private int tileWidth, tileHeight;   // pixels
 
-        // Layers for rendering and collision
-        private List<TileLayer> layers = new List<TileLayer>();
+        private readonly List<TileLayer> layers = new();
+        private readonly Dictionary<int, Animation> animations = new();
 
-        // Tileset texture
         private Texture2D tilesetTexture;
+        private int tilesetFirstGid = 1;    // set while loading
 
-        // Animation timers
-        private float animationTimer = 0;
-        private Dictionary<int, Animation> animations = new Dictionary<int, Animation>();
+        private float animationClock = 0f;
 
-        // Public properties
+        // ───────────────────────────────────────── public API ─────────────────────────────────────
         public int Width => width;
         public int Height => height;
         public int TileWidth => tileWidth;
@@ -34,385 +35,330 @@ namespace SimplifiedGame
         public int WidthInPixels => width * tileWidth;
         public int HeightInPixels => height * tileHeight;
 
-        // Load the map content
-        public void LoadContent(ContentManager content, string tmxFilename)
+        /// <summary>
+        /// Reads a TMX file (without extension) from the Content directory and loads any tileset images via the MonoGame pipeline.
+        /// </summary>
+        public void LoadContent(ContentManager content, string mapName)
         {
-            try
+            // ───────────── open TMX ─────────────
+            string tmxPath = Path.Combine(content.RootDirectory, mapName + ".tmx");
+            Console.WriteLine($"[TileMap] Loading TMX: {tmxPath}");
+
+            if (!File.Exists(tmxPath))
             {
-                // Get the full path to the TMX file
-                string tmxPath = Path.Combine(content.RootDirectory, tmxFilename + ".tmx");
+                throw new FileNotFoundException($"TMX file not found: {tmxPath}");
+            }
 
-                // Load the TMX file
-                XDocument doc = XDocument.Load(tmxPath);
-                XElement mapElement = doc.Element("map");
+            XElement mapElement = XDocument.Load(tmxPath).Element("map") ?? throw new Exception("invalid TMX");
 
-                // Read map properties
-                width = int.Parse(mapElement.Attribute("width").Value);
-                height = int.Parse(mapElement.Attribute("height").Value);
-                tileWidth = int.Parse(mapElement.Attribute("tilewidth").Value);
-                tileHeight = int.Parse(mapElement.Attribute("tileheight").Value);
+            width = int.Parse(mapElement.Attribute("width").Value);
+            height = int.Parse(mapElement.Attribute("height").Value);
+            tileWidth = int.Parse(mapElement.Attribute("tilewidth").Value);
+            tileHeight = int.Parse(mapElement.Attribute("tileheight").Value);
 
-                // Find tileset element
-                XElement tilesetElement = mapElement.Element("tileset");
-                string tilesetName = tilesetElement.Attribute("name").Value;
+            Console.WriteLine($"[TileMap] Map dimensions: {width}x{height} tiles, {tileWidth}x{tileHeight} pixels per tile");
 
-                // Determine tileset image path from the source attribute
-                XElement imageElement = tilesetElement.Element("image");
-                string source = imageElement.Attribute("source").Value;
+            // ───────────── tileset (assumes single tileset) ─────────────
+            XElement tilesetEl = mapElement.Element("tileset");
+            if (tilesetEl == null)
+            {
+                throw new Exception("No tileset found in TMX file");
+            }
 
-                // Extract just the filename without extension to use with Content.Load
-                string tilesetPath = Path.GetFileNameWithoutExtension(source);
+            tilesetFirstGid = int.Parse(tilesetEl.Attribute("firstgid")?.Value ?? "1");
 
-                // Load tileset texture - assuming it's been processed by the content pipeline
-                try
+            // Check if tileset has embedded image
+            XElement imageEl = tilesetEl.Element("image");
+            string imageSource = null;
+            string textureKey = null;
+
+            if (imageEl != null)
+            {
+                // Embedded tileset
+                imageSource = imageEl.Attribute("source")?.Value;
+                if (imageSource == null)
                 {
-                    tilesetTexture = content.Load<Texture2D>(tilesetPath);
+                    throw new Exception("Tileset image element found but no source attribute");
                 }
-                catch (Exception ex)
+                textureKey = Path.GetFileNameWithoutExtension(imageSource);
+                Console.WriteLine($"[TileMap] Found embedded tileset with image: {imageSource}");
+            }
+            else
+            {
+                // Check if it's an external tileset reference
+                string externalSource = tilesetEl.Attribute("source")?.Value;
+                if (externalSource != null)
                 {
-                    // If we can't load it (maybe it's not in the content pipeline),
-                    // use a placeholder texture
-                    Console.WriteLine($"Error loading tileset texture: {ex.Message}");
-                    tilesetTexture = new Texture2D(content.ServiceProvider.GetService(typeof(GraphicsDevice)) as GraphicsDevice, 32, 32);
-                    Color[] colorData = new Color[32 * 32];
-                    for (int i = 0; i < colorData.Length; i++)
-                        colorData[i] = Color.Magenta; // Placeholder color
-                    tilesetTexture.SetData(colorData);
-                }
+                    // External tileset - we need to load the .tsx file
+                    string tsxPath = Path.Combine(content.RootDirectory, externalSource);
+                    Console.WriteLine($"[TileMap] Loading external tileset: {tsxPath}");
 
-                // Load animations
-                foreach (XElement tileElement in tilesetElement.Elements("tile"))
-                {
-                    int tileId = int.Parse(tileElement.Attribute("id").Value);
-                    XElement animationElement = tileElement.Element("animation");
-
-                    if (animationElement != null)
+                    if (!File.Exists(tsxPath))
                     {
-                        List<AnimationFrame> frames = new List<AnimationFrame>();
-
-                        foreach (XElement frameElement in animationElement.Elements("frame"))
-                        {
-                            int frameTileId = int.Parse(frameElement.Attribute("tileid").Value);
-                            int duration = int.Parse(frameElement.Attribute("duration").Value);
-                            frames.Add(new AnimationFrame(frameTileId, duration / 1000f)); // Convert ms to seconds
-                        }
-
-                        animations[tileId] = new Animation(frames);
-                    }
-                }
-
-                // Load layers
-                foreach (XElement layerElement in mapElement.Elements("layer"))
-                {
-                    string name = layerElement.Attribute("name").Value;
-                    bool visible = true;
-                    XAttribute visibleAttr = layerElement.Attribute("visible");
-                    if (visibleAttr != null)
-                    {
-                        visible = int.Parse(visibleAttr.Value) == 1;
+                        throw new FileNotFoundException($"External tileset file not found: {tsxPath}");
                     }
 
-                    // Create the layer
-                    TileLayer layer = new TileLayer(name, width, height, visible);
+                    XDocument tsxDoc = XDocument.Load(tsxPath);
+                    XElement externalImageEl = tsxDoc.Root.Element("image");
 
-                    // Load layer data
-                    XElement dataElement = layerElement.Element("data");
-                    string encoding = dataElement.Attribute("encoding")?.Value;
-
-                    // Parse the tile data
-                    if (encoding == "csv")
+                    if (externalImageEl?.Attribute("source") != null)
                     {
-                        string[] values = dataElement.Value.Split(new[] { ',', '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
-                        int index = 0;
+                        imageSource = externalImageEl.Attribute("source").Value;
+                        textureKey = Path.GetFileNameWithoutExtension(imageSource);
+                        Console.WriteLine($"[TileMap] External tileset references image: {imageSource}");
 
-                        for (int y = 0; y < height; y++)
+                        // Load animations from external tileset
+                        foreach (var tileEl in tsxDoc.Root.Elements("tile"))
                         {
-                            for (int x = 0; x < width; x++)
+                            int localId = int.Parse(tileEl.Attribute("id").Value);
+                            XElement animEl = tileEl.Element("animation");
+                            if (animEl is null) continue;
+
+                            List<AnimationFrame> frames = new();
+                            foreach (var frameEl in animEl.Elements("frame"))
                             {
-                                if (index < values.Length)
-                                {
-                                    int gid = int.Parse(values[index].Trim());
-                                    layer.SetTile(x, y, gid);
-                                    index++;
-                                }
+                                frames.Add(new AnimationFrame(int.Parse(frameEl.Attribute("tileid").Value),
+                                                              int.Parse(frameEl.Attribute("duration").Value) / 1000f));
                             }
+                            animations[localId] = new Animation(frames);
                         }
                     }
                     else
                     {
-                        // For XML encoded data
-                        int index = 0;
-                        foreach (XElement tileElement in dataElement.Elements("tile"))
-                        {
-                            int gid = int.Parse(tileElement.Attribute("gid").Value);
-                            int x = index % width;
-                            int y = index / width;
-                            layer.SetTile(x, y, gid);
-                            index++;
-                        }
+                        throw new Exception($"Could not find image source in external tileset {externalSource}");
                     }
-
-                    layers.Add(layer);
                 }
+                else
+                {
+                    // Create a default texture if no tileset image is found
+                    Console.WriteLine("[TileMap] Warning: No tileset image found, creating placeholder");
+                    textureKey = "placeholder";
+                }
+            }
 
-                Console.WriteLine($"Loaded map: {width}x{height} tiles, {tileWidth}x{tileHeight} tile size");
+            try
+            {
+                if (textureKey == "placeholder" || textureKey == null)
+                {
+                    // Create a default placeholder texture
+                    var gd = content.ServiceProvider.GetService(typeof(GraphicsDevice)) as GraphicsDevice;
+                    tilesetTexture = new Texture2D(gd, 32, 32);
+                    Color[] colors = new Color[32 * 32];
+                    for (int i = 0; i < colors.Length; i++)
+                        colors[i] = (i % 64 < 32) ? Color.White : Color.Gray; // Checkerboard pattern
+                    tilesetTexture.SetData(colors);
+                    Console.WriteLine("[TileMap] Using checkerboard placeholder texture");
+                }
+                else
+                {
+                    Console.WriteLine($"[TileMap] Loading texture: {textureKey}");
+                    tilesetTexture = content.Load<Texture2D>(textureKey);
+                    Console.WriteLine($"[TileMap] Texture loaded successfully. Size: {tilesetTexture.Width}x{tilesetTexture.Height}");
+                }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error loading map: {ex.Message}");
-
-                // Create a default map in case of loading failure
-                CreateDefaultMap();
+                Console.WriteLine($"[TileMap] Could not load tileset texture '{textureKey}': {ex.Message}. Using placeholder.");
+                var gd = content.ServiceProvider.GetService(typeof(GraphicsDevice)) as GraphicsDevice;
+                tilesetTexture = new Texture2D(gd, 32, 32);
+                Color[] mag = new Color[32 * 32];
+                for (int i = 0; i < mag.Length; i++) mag[i] = Color.Magenta;
+                tilesetTexture.SetData(mag);
             }
-        }
 
-        // Create a simple default map in case loading fails
-        private void CreateDefaultMap()
-        {
-            width = 40;
-            height = 24;
-            tileWidth = 32;
-            tileHeight = 32;
-
-            // Create a basic ground layer
-            TileLayer groundLayer = new TileLayer("ground", width, height, true);
-
-            // Fill with a single tile type
-            for (int y = 0; y < height; y++)
+            // ───────────── optional tile animations (for embedded tilesets) ─────────────
+            if (imageEl != null) // Only load animations if it's an embedded tileset
             {
-                for (int x = 0; x < width; x++)
+                foreach (var tileEl in tilesetEl.Elements("tile"))
                 {
-                    // Border tiles
-                    if (x == 0 || y == 0 || x == width - 1 || y == height - 1)
+                    int localId = int.Parse(tileEl.Attribute("id").Value);
+                    XElement animEl = tileEl.Element("animation");
+                    if (animEl is null) continue;
+
+                    List<AnimationFrame> frames = new();
+                    foreach (var frameEl in animEl.Elements("frame"))
                     {
-                        groundLayer.SetTile(x, y, 2); // Border
+                        frames.Add(new AnimationFrame(int.Parse(frameEl.Attribute("tileid").Value),
+                                                      int.Parse(frameEl.Attribute("duration").Value) / 1000f));
                     }
-                    else
-                    {
-                        groundLayer.SetTile(x, y, 1); // Ground
-                    }
+                    animations[localId] = new Animation(frames);
                 }
             }
 
-            layers.Add(groundLayer);
-
-            // Create a obstacle layer
-            TileLayer obstacleLayer = new TileLayer("obstacles", width, height, true);
-
-            // Add some random obstacles
-            Random random = new Random();
-            for (int i = 0; i < 30; i++)
+            // ───────────── tile layers ─────────────
+            foreach (var layerEl in mapElement.Elements("layer"))
             {
-                int x = random.Next(3, width - 3);
-                int y = random.Next(3, height - 3);
-                obstacleLayer.SetTile(x, y, 3); // Obstacle
+                string layerName = layerEl.Attribute("name").Value;
+                Console.WriteLine($"[TileMap] Loading layer: {layerName}");
+
+                var layer = new TileLayer(layerName,
+                                          width, height,
+                                          int.Parse(layerEl.Attribute("visible")?.Value ?? "1") == 1);
+
+                XElement dataEl = layerEl.Element("data");
+                string encoding = dataEl.Attribute("encoding")?.Value;
+                string compression = dataEl.Attribute("compression")?.Value;
+
+                Console.WriteLine($"[TileMap] Layer encoding: {encoding ?? "none"}, compression: {compression ?? "none"}");
+
+                // ---------- CSV ----------
+                if (encoding == "csv")
+                {
+                    string[] tokens = dataEl.Value.Split(
+                        new[] { ',', '\n', '\r', '\t', ' ' },
+                        StringSplitOptions.RemoveEmptyEntries);
+
+                    int idx = 0;
+                    for (int y = 0; y < height; y++)
+                        for (int x = 0; x < width; x++)
+                        {
+                            int gid = (idx < tokens.Length && int.TryParse(tokens[idx++], out int g)) ? g : 0;
+                            layer.SetTile(x, y, gid);
+                        }
+                }
+                // ---------- Base-64 (+ optional gzip / zlib) ----------
+                else if (encoding == "base64")
+                {
+                    byte[] raw = Convert.FromBase64String(dataEl.Value.Trim());
+
+                    Stream s = new MemoryStream(raw);
+                    if (compression == "gzip")
+                        s = new GZipStream(s, CompressionMode.Decompress);
+                    else if (compression == "zlib")
+                        s = new DeflateStream(s, CompressionMode.Decompress);
+
+                    using var br = new BinaryReader(s);
+                    for (int y = 0; y < height; y++)
+                        for (int x = 0; x < width; x++)
+                            layer.SetTile(x, y, br.ReadInt32());
+                }
+                // ---------- Plain XML <tile gid="…"/> ----------
+                else if (encoding == null)
+                {
+                    int index = 0;
+                    foreach (var tileEl in dataEl.Elements("tile"))
+                    {
+                        int gid = int.Parse(tileEl.Attribute("gid").Value);
+                        int x = index % width;
+                        int y = index / width;
+                        layer.SetTile(x, y, gid);
+                        index++;
+                    }
+                }
+                else
+                    throw new NotSupportedException($"Layer encoding '{encoding}' not supported.");
+
+                layers.Add(layer);
             }
 
-            layers.Add(obstacleLayer);
+            Console.WriteLine($"[TileMap] Loaded '{mapName}' ({width}x{height} tiles, {layers.Count} layers)");
         }
 
-        // Update animations
+        // ───────────────────────────────────────── runtime update / draw ─────────────────────────
         public void Update(GameTime gameTime)
         {
-            float deltaTime = (float)gameTime.ElapsedGameTime.TotalSeconds;
-            animationTimer += deltaTime;
-
-            foreach (var animation in animations.Values)
-            {
-                animation.Update(animationTimer);
-            }
+            animationClock += (float)gameTime.ElapsedGameTime.TotalSeconds;
+            foreach (var anim in animations.Values) anim.Update(animationClock);
         }
 
-        // Draw the map
-        public void Draw(SpriteBatch spriteBatch)
+        public void Draw(SpriteBatch sb)
         {
             foreach (var layer in layers)
             {
-                if (layer.Visible)
-                {
-                    DrawLayer(spriteBatch, layer);
-                }
+                if (!layer.Visible) continue;
+                DrawLayer(sb, layer);
             }
         }
 
-        // Draw a single layer
-        private void DrawLayer(SpriteBatch spriteBatch, TileLayer layer)
+        private void DrawLayer(SpriteBatch sb, TileLayer layer)
         {
-            // Calculate tileset properties
-            int tilesPerRow = tilesetTexture.Width / tileWidth;
+            int columns = tilesetTexture.Width / tileWidth;
 
             for (int y = 0; y < height; y++)
             {
                 for (int x = 0; x < width; x++)
                 {
-                    int tileId = layer.GetTile(x, y);
+                    int gid = layer.GetTile(x, y);
+                    if (gid == 0) continue;   // empty
 
-                    if (tileId > 0) // 0 means no tile
-                    {
-                        // Convert from Tiled GID (1-based) to 0-based index for calculations
-                        int index = tileId - 1;
+                    int localId = gid - tilesetFirstGid;     // translate to 0‑based index within tileset
+                    if (localId < 0) continue;               // safety
 
-                        // Check if this tile has an animation
-                        if (animations.ContainsKey(index))
-                        {
-                            // Use the current animation frame
-                            index = animations[index].CurrentFrame;
-                        }
+                    if (animations.TryGetValue(localId, out var anim))
+                        localId = anim.CurrentFrame;
 
-                        // Calculate the source rectangle
-                        int srcX = (index % tilesPerRow) * tileWidth;
-                        int srcY = (index / tilesPerRow) * tileHeight;
-                        Rectangle srcRect = new Rectangle(srcX, srcY, tileWidth, tileHeight);
-
-                        // Calculate destination position
-                        Vector2 position = new Vector2(x * tileWidth, y * tileHeight);
-
-                        // Draw the tile
-                        spriteBatch.Draw(
-                            tilesetTexture,
-                            position,
-                            srcRect,
-                            Color.White
-                        );
-                    }
+                    int srcX = (localId % columns) * tileWidth;
+                    int srcY = (localId / columns) * tileHeight;
+                    sb.Draw(tilesetTexture,
+                            new Vector2(x * tileWidth, y * tileHeight),
+                            new Rectangle(srcX, srcY, tileWidth, tileHeight),
+                            Color.White);
                 }
             }
         }
 
-        // Check collision with the map
-        public bool CheckCollision(Vector2 position, float radius)
+        // ───────────────────────────────────────── collision helper ─────────────────────────
+        public bool CheckCollision(Vector2 pos, float radius)
         {
-            // Find the obstacle layer
-            TileLayer obstacleLayer = null;
-            foreach (var layer in layers)
+            // very simple: any tile on a layer whose name contains "obstacle" blocks movement
+            TileLayer obstacleLayer = layers.Find(l => l.Name.ToLower().Contains("obstacle"));
+            if (obstacleLayer is null) return false;
+
+            for (float a = 0; a < MathF.Tau; a += MathF.PI / 4)
             {
-                if (layer.Name.ToLower().Contains("obstacle"))
-                {
-                    obstacleLayer = layer;
-                    break;
-                }
+                Vector2 p = pos + radius * 0.8f * new Vector2(MathF.Cos(a), MathF.Sin(a));
+                int tx = (int)(p.X / tileWidth);
+                int ty = (int)(p.Y / tileHeight);
+                if (tx >= 0 && tx < width && ty >= 0 && ty < height && obstacleLayer.GetTile(tx, ty) != 0)
+                    return true;
             }
-
-            if (obstacleLayer == null)
-                return false;
-
-            // Check a few points around the object for better collision detection
-            for (float angle = 0; angle < 360; angle += 45)
-            {
-                float radians = MathHelper.ToRadians(angle);
-                Vector2 checkPoint = new Vector2(
-                    position.X + (float)Math.Cos(radians) * radius * 0.8f,
-                    position.Y + (float)Math.Sin(radians) * radius * 0.8f
-                );
-
-                // Convert to tile coordinates
-                int tileX = (int)(checkPoint.X / tileWidth);
-                int tileY = (int)(checkPoint.Y / tileHeight);
-
-                // Check if there's an obstacle tile at this position
-                if (tileX >= 0 && tileX < width && tileY >= 0 && tileY < height)
-                {
-                    int tileId = obstacleLayer.GetTile(tileX, tileY);
-                    if (tileId > 0) // Any non-zero tile is considered an obstacle
-                    {
-                        return true;
-                    }
-                }
-            }
-
             return false;
         }
     }
 
-    // Represents a layer of tiles
+    // ───────────────────────────────────────── helper classes ───────────────────────────────────
     public class TileLayer
     {
-        private string name;
-        private int width;
-        private int height;
-        private bool visible;
-        private int[,] tiles;
-
-        public string Name => name;
-        public int Width => width;
-        public int Height => height;
+        private readonly int[,] tiles;
+        public string Name { get; }
         public bool Visible { get; set; }
 
-        public TileLayer(string name, int width, int height, bool visible)
+        public TileLayer(string name, int w, int h, bool visible)
         {
-            this.name = name;
-            this.width = width;
-            this.height = height;
-            this.visible = visible;
-            tiles = new int[width, height];
+            Name = name;
+            Visible = visible;
+            tiles = new int[w, h];
         }
-
-        public void SetTile(int x, int y, int tileId)
-        {
-            if (x >= 0 && x < width && y >= 0 && y < height)
-            {
-                tiles[x, y] = tileId;
-            }
-        }
-
-        public int GetTile(int x, int y)
-        {
-            if (x >= 0 && x < width && y >= 0 && y < height)
-            {
-                return tiles[x, y];
-            }
-            return 0;
-        }
+        public void SetTile(int x, int y, int gid) => tiles[x, y] = gid;
+        public int GetTile(int x, int y) => tiles[x, y];
     }
 
-    // Represents an animation frame
     public class AnimationFrame
     {
-        public int TileId { get; private set; }
-        public float Duration { get; private set; }
-
-        public AnimationFrame(int tileId, float duration)
-        {
-            TileId = tileId;
-            Duration = duration;
-        }
+        public int TileId { get; }
+        public float Length { get; }  // seconds
+        public AnimationFrame(int id, float len) { TileId = id; Length = len; }
     }
 
-    // Represents a tile animation
     public class Animation
     {
-        private List<AnimationFrame> frames;
-        private int currentFrameIndex = 0;
+        private readonly AnimationFrame[] frames;
+        private float totalLength;
+        public int CurrentFrame { get; private set; }
 
-        public int CurrentFrame => frames[currentFrameIndex].TileId;
-
-        public Animation(List<AnimationFrame> frames)
+        public Animation(List<AnimationFrame> f)
         {
-            this.frames = frames;
+            frames = f.ToArray();
+            foreach (var fr in frames) totalLength += fr.Length;
         }
-
-        public void Update(float totalTime)
+        public void Update(float time)
         {
-            // Calculate total duration of all frames
-            float totalDuration = 0;
-            foreach (var frame in frames)
+            float t = time % totalLength;
+            float accum = 0f;
+            for (int i = 0; i < frames.Length; i++)
             {
-                totalDuration += frame.Duration;
-            }
-
-            // Calculate current position in animation cycle
-            float animTime = totalTime % totalDuration;
-
-            // Find current frame
-            float timePosition = 0;
-            for (int i = 0; i < frames.Count; i++)
-            {
-                timePosition += frames[i].Duration;
-                if (animTime < timePosition)
-                {
-                    currentFrameIndex = i;
-                    break;
-                }
+                accum += frames[i].Length;
+                if (t <= accum) { CurrentFrame = frames[i].TileId; break; }
             }
         }
     }
