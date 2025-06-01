@@ -1,4 +1,3 @@
-
 #----------------------------- Global Properties ----------------------------#
 
 /outputDir:bin/$(Platform)
@@ -12,6 +11,7 @@
 
 
 #---------------------------------- Content ---------------------------------#
+
 #begin procedural_tileset.png
 /importer:TextureImporter
 /processor:TextureProcessor
@@ -26,8 +26,6 @@
 
 /copy:GameMap.tmx
 
-
-
 #begin forest.png
 /importer:TextureImporter
 /processor:TextureProcessor
@@ -41,6 +39,53 @@
 /build:forest.png
 
 /copy:forest.tsx
-
 /copy:Testkarta.tmx
 
+# Wizard sprites - add these new entries
+#begin wizard_red.png
+/importer:TextureImporter
+/processor:TextureProcessor
+/processorParam:ColorKeyColor=255,0,255,255
+/processorParam:ColorKeyEnabled=True
+/processorParam:GenerateMipmaps=False
+/processorParam:PremultiplyAlpha=True
+/processorParam:ResizeToPowerOfTwo=False
+/processorParam:MakeSquare=False
+/processorParam:TextureFormat:Color
+/build:wizard_red.png
+
+#begin wizard_blue.png
+/importer:TextureImporter
+/processor:TextureProcessor
+/processorParam:ColorKeyColor=255,0,255,255
+/processorParam:ColorKeyEnabled=True
+/processorParam:GenerateMipmaps=False
+/processorParam:PremultiplyAlpha=True
+/processorParam:ResizeToPowerOfTwo=False
+/processorParam:MakeSquare=False
+/processorParam:TextureFormat:Color
+/build:wizard_blue.png
+
+#begin wizard_green.png
+/importer:TextureImporter
+/processor:TextureProcessor
+/processorParam:ColorKeyColor=255,0,255,255
+/processorParam:ColorKeyEnabled=True
+/processorParam:GenerateMipmaps=False
+/processorParam:PremultiplyAlpha=True
+/processorParam:ResizeToPowerOfTwo=False
+/processorParam:MakeSquare=False
+/processorParam:TextureFormat:Color
+/build:wizard_green.png
+
+#begin wizard_purple.png
+/importer:TextureImporter
+/processor:TextureProcessor
+/processorParam:ColorKeyColor=255,0,255,255
+/processorParam:ColorKeyEnabled=True
+/processorParam:GenerateMipmaps=False
+/processorParam:PremultiplyAlpha=True
+/processorParam:ResizeToPowerOfTwo=False
+/processorParam:MakeSquare=False
+/processorParam:TextureFormat:Color
+/build:wizard_purple.png

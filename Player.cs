@@ -3,16 +3,17 @@ using Microsoft.Xna.Framework.Graphics;
 using Microsoft.Xna.Framework.Input;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace SimplifiedGame
 {
-    // Gun types for upgrades
-    public enum GunType
+    // Wizard types for the 4 different magical classes
+    public enum WizardType
     {
-        Pistol,    // Basic starting gun
-        Shotgun,   // Multiple projectiles
-        Rifle,     // Fast, accurate
-        Cannon     // Slow, high damage
+        Fire,       // Red - High damage, area effects, slower casting
+        Ice,        // Blue - Fast projectiles, slowing effects, precision
+        Nature,     // Green - Healing abilities, balanced stats, defensive spells
+        Lightning   // Purple/Yellow - High speed, chain lightning, rapid casting
     }
 
     class Player
@@ -24,67 +25,147 @@ namespace SimplifiedGame
         private float speed;
         private Color color;
         private int playerIndex;
-        private Texture2D texture;
-        private float rotation = 0f;
+        private WizardType wizardType;
 
-        // Health
+        // Health and mana
         private float health = 10f;
         private float maxHealth = 10f;
+        private float mana = 100f;
+        private float maxMana = 100f;
+        private float manaRegenRate = 20f; // Mana per second
 
         // Screen boundaries
         private int screenWidth;
         private int screenHeight;
 
-        // Origin for drawing
-        private Vector2 origin;
-
-        // Player scale (smaller than original)
-        private float scale = 0.7f;
-
-        // Gun properties
-        private GunType gunType = GunType.Pistol;
-        private float fireRate = 0.5f; // Time between shots in seconds
-        private float fireTimer = 0f;
-        private float projectileDamage = 1f;
-        private float projectileSpeed = 400f;
-        private int projectilesPerShot = 1;
-        private float spreadAngle = 0.1f; // Used for shotgun
+        // Wizard spell properties
+        private float castingTime = 0.5f; // Time between spells in seconds
+        private float castingTimer = 0f;
+        private float spellDamage = 1f;
+        private float spellSpeed = 400f;
+        private float spellManaCost = 10f;
 
         // Modifiers for upgrades
-        public float DamageModifier { get; private set; } = 1.0f;
+        public float SpellPowerModifier { get; private set; } = 1.0f;
         public float SpeedModifier { get; private set; } = 1.0f;
-        public float FireRateModifier { get; private set; } = 1.0f;
+        public float CastSpeedModifier { get; private set; } = 1.0f;
+        public float ManaModifier { get; private set; } = 1.0f;
         public float HealthModifier { get; private set; } = 1.0f;
+
+        // Animation and sprite properties
+        private Texture2D wizardTexture;
+        private Rectangle currentFrame;
+        private int frameWidth = 64; // Width of each sprite frame
+        private int frameHeight = 64; // Height of each sprite frame
+        private float animationTimer = 0f;
+        private int currentFrameIndex = 0;
+        private bool isMoving = false;
+        private bool isCasting = false;
+        private float castingAnimationTimer = 0f;
+        private float castingAnimationDuration = 0.8f;
+
+        // Direction and flipping
+        private bool facingLeft = false;
+        private SpriteEffects spriteEffect = SpriteEffects.None;
+
+        // Track if spell has been fired during current cast
+        private bool spellFiredThisCast = false;
+
+        // Auto-aim settings
+        private float autoAimConeAngle = MathHelper.Pi / 1.5f; // 60 degree cone (Pi/3)
+        private float autoAimRange = 300f; // Max distance to auto-aim
 
         // Public properties
         public Color Color => color;
         public Vector2 Position => position;
         public float Health => health;
         public float MaxHealth => maxHealth;
-        public float Radius => texture.Width * scale / 2;
+        public float Mana => mana;
+        public float MaxMana => maxMana;
+        public float Radius => 18f; // Smaller hitbox - roughly the actual character size
         public bool IsAlive => health > 0;
-        public GunType CurrentGun => gunType;
+        public WizardType WizardType => wizardType;
 
-        public Player(Vector2 position, Color color, int playerIndex, int screenWidth, int screenHeight, Texture2D texture)
+        // Store projectile texture for delayed firing
+        private Texture2D projectileTexture;
+
+        // Store enemies list for auto-aim
+        private List<Enemy> currentEnemies;
+
+        public Player(Vector2 position, Color color, int playerIndex, int screenWidth, int screenHeight, Texture2D wizardTexture)
         {
             this.position = position;
             this.color = color;
             this.playerIndex = playerIndex;
-            this.speed = 200;
+            this.speed = 100;
             this.screenWidth = screenWidth;
             this.screenHeight = screenHeight;
-            this.texture = texture;
+            this.wizardTexture = wizardTexture;
+
+            // Set wizard type based on player index/color
+            switch (playerIndex)
+            {
+                case 0: wizardType = WizardType.Fire; break;      // Red player
+                case 1: wizardType = WizardType.Nature; break;   // Green player
+                case 2: wizardType = WizardType.Ice; break;      // Blue player
+                case 3: wizardType = WizardType.Lightning; break; // Yellow/Purple player
+            }
 
             // Set initial direction (facing right)
             this.direction = new Vector2(1, 0);
             this.aimDirection = new Vector2(1, 0);
-            this.rotation = 0f; // Starting rotation (facing right)
+            this.facingLeft = false;
 
-            // Set origin to center of texture
-            this.origin = new Vector2(texture.Width / 2, texture.Height / 2);
+            // Initialize wizard-specific stats
+            InitializeWizardStats();
+
+            // Set initial animation frame - start with frame 0
+            currentFrameIndex = 0;
+            UpdateAnimationFrame();
         }
 
-        // Method to reset the player's position
+        private void InitializeWizardStats()
+        {
+            switch (wizardType)
+            {
+                case WizardType.Fire:
+                    spellDamage = 1.5f;
+                    castingTime = 0.7f;
+                    spellManaCost = 15f;
+                    spellSpeed = 300f;
+                    autoAimRange = 350f; // Shorter range but high damage
+                    break;
+
+                case WizardType.Ice:
+                    spellDamage = 1.0f;
+                    castingTime = 0.4f;
+                    spellManaCost = 8f;
+                    spellSpeed = 500f;
+                    autoAimRange = 400f; // Longer range, fast projectiles
+                    break;
+
+                case WizardType.Nature:
+                    spellDamage = 0.8f;
+                    castingTime = 0.5f;
+                    spellManaCost = 10f;
+                    spellSpeed = 400f;
+                    health = 12f;
+                    maxHealth = 12f;
+                    autoAimRange = 320f; // Balanced range
+                    break;
+
+                case WizardType.Lightning:
+                    spellDamage = 1.0f;
+                    castingTime = 0.3f;
+                    spellManaCost = 12f;
+                    spellSpeed = 600f;
+                    speed = 120f;
+                    autoAimRange = 380f; // Good range for chain lightning
+                    autoAimConeAngle = MathHelper.PiOver2; // Wider cone for lightning (90 degrees)
+                    break;
+            }
+        }
+
         public void ResetPosition(Vector2 newPosition)
         {
             position = newPosition;
@@ -102,196 +183,303 @@ namespace SimplifiedGame
             if (health > maxHealth) health = maxHealth;
         }
 
+        public void RestoreMana(float amount)
+        {
+            mana += amount;
+            if (mana > maxMana) mana = maxMana;
+        }
+
         public void Update(GameTime gameTime)
         {
             float deltaTime = (float)gameTime.ElapsedGameTime.TotalSeconds;
 
-            // Get movement using the new relative movement system
-            MovementData movementData = InputManager.GetRelativeMovement(playerIndex);
+            // Regenerate mana
+            mana += manaRegenRate * deltaTime;
+            if (mana > maxMana) mana = maxMana;
 
-            // Apply rotation from controls
-            rotation += movementData.RotationAmount;
+            // Get regular movement
+            Vector2 movement = InputManager.GetMovement(playerIndex);
 
-            // Update direction vector based on current rotation
-            direction = new Vector2(
-                (float)Math.Cos(rotation),
-                (float)Math.Sin(rotation)
-            );
-
-            // Apply forward/backward movement along current direction
-            Vector2 movement = Vector2.Zero;
-            if (Math.Abs(movementData.ForwardAmount) > 0.1f) // Small deadzone
+            // Apply movement
+            isMoving = false;
+            if (movement.Length() > 0.1f)
             {
-                // Scale by speed, direction and input amount
-                movement = direction * movementData.ForwardAmount * speed * SpeedModifier * deltaTime;
-                position += movement;
+                isMoving = true;
+                position += movement * speed * SpeedModifier * deltaTime;
+
+                // Update facing direction based on movement
+                if (movement.X < -0.1f)
+                {
+                    facingLeft = true;
+                    spriteEffect = SpriteEffects.FlipHorizontally;
+                    direction = new Vector2(-1, 0);
+                }
+                else if (movement.X > 0.1f)
+                {
+                    facingLeft = false;
+                    spriteEffect = SpriteEffects.None;
+                    direction = new Vector2(1, 0);
+                }
             }
 
-            // Keep player within full screen bounds with small padding
-            float padding = 20; // Small padding so player doesn't disappear off-screen
+            // Keep player within bounds
+            float padding = 20;
             position.X = MathHelper.Clamp(position.X, padding, screenWidth - padding);
             position.Y = MathHelper.Clamp(position.Y, padding, screenHeight - padding);
 
-            // Get aim direction from right stick or arrow keys
+            // Get aim direction - this sets the "cone center" for auto-aim
             Vector2 aimInput = InputManager.GetAimDirection(playerIndex);
-
-            // If there's explicit aim input, use it for aiming only (not for movement direction)
-            if (aimInput.Length() > 0.2f) // Deadzone
+            if (aimInput.Length() > 0.2f)
             {
                 aimDirection = aimInput;
                 aimDirection.Normalize();
             }
             else
             {
-                // Otherwise use current facing direction for aiming
+                // Default aim direction based on facing
                 aimDirection = direction;
             }
 
-            // Update fire timer
-            if (fireTimer > 0)
+            // Update timers
+            if (castingTimer > 0)
             {
-                fireTimer -= deltaTime;
+                castingTimer -= deltaTime;
+            }
+
+            if (isCasting)
+            {
+                castingAnimationTimer -= deltaTime;
+                if (castingAnimationTimer <= 0)
+                {
+                    isCasting = false;
+                    currentFrameIndex = 0;
+                    spellFiredThisCast = false; // Reset for next cast
+                }
+            }
+
+            // Update animation
+            UpdateAnimation(deltaTime);
+        }
+
+        private void UpdateAnimation(float deltaTime)
+        {
+            animationTimer += deltaTime;
+
+            float frameTime = isCasting ? 0.1f : (isMoving ? 0.15f : 0.5f);
+
+            if (animationTimer >= frameTime)
+            {
+                animationTimer = 0f;
+                UpdateAnimationFrame();
             }
         }
 
-        // Try to fire - returns true if a shot was fired
-        public bool TryFire(out List<Projectile> newProjectiles, Texture2D projectileTexture)
+        private void UpdateAnimationFrame()
+        {
+            // Animation layout
+            int row = 0;
+            int maxFrames = 5;
+
+            if (isCasting)
+            {
+                row = 6; // Ground attack row
+                maxFrames = 9;
+                currentFrameIndex++;
+                if (currentFrameIndex >= maxFrames)
+                {
+                    currentFrameIndex = maxFrames - 1;
+                }
+            }
+            else if (isMoving)
+            {
+                row = 3; // Walk row
+                maxFrames = 8;
+                currentFrameIndex = (currentFrameIndex + 1) % maxFrames;
+            }
+            else
+            {
+                row = 0; // Idle row
+                maxFrames = 5;
+                currentFrameIndex = (currentFrameIndex + 1) % maxFrames;
+            }
+
+            // Calculate frame position (64x64 frames)
+            int pixelX = currentFrameIndex * frameWidth;
+            int pixelY = row * frameHeight;
+
+            currentFrame = new Rectangle(pixelX, pixelY, frameWidth, frameHeight);
+        }
+
+        public bool TryCastSpell(out List<Projectile> newProjectiles, Texture2D projectileTexture, List<Enemy> enemies)
         {
             newProjectiles = new List<Projectile>();
 
-            // Check if we can fire
-            if (fireTimer <= 0)
+            float adjustedManaCost = spellManaCost / ManaModifier;
+            if (castingTimer <= 0 && mana >= adjustedManaCost && !isCasting)
             {
-                // Reset fire timer based on gun type and modifiers
-                fireTimer = fireRate / FireRateModifier;
+                isCasting = true;
+                currentFrameIndex = 0; // Reset to start of casting animation
+                castingAnimationTimer = castingAnimationDuration;
+                castingTimer = castingTime / CastSpeedModifier;
+                mana -= adjustedManaCost;
+                spellFiredThisCast = false; // Reset firing flag
 
-                // Create projectiles based on gun type
-                switch (gunType)
-                {
-                    case GunType.Pistol:
-                        // Single shot
-                        newProjectiles.Add(CreateProjectile(projectileTexture));
-                        break;
+                // Store texture and enemies for delayed firing
+                this.projectileTexture = projectileTexture;
+                this.currentEnemies = enemies;
 
-                    case GunType.Shotgun:
-                        // Multiple spread shots
-                        for (int i = 0; i < 5; i++)
-                        {
-                            float angle = rotation - spreadAngle + (spreadAngle * 2 * i / 4);
-                            Vector2 dir = new Vector2((float)Math.Cos(angle), (float)Math.Sin(angle));
-                            newProjectiles.Add(CreateProjectile(projectileTexture, dir));
-                        }
-                        break;
+                return false; // Don't return projectiles immediately
+            }
 
-                    case GunType.Rifle:
-                        // Fast, accurate single shot
-                        newProjectiles.Add(CreateProjectile(projectileTexture));
-                        break;
-
-                    case GunType.Cannon:
-                        // High damage single shot
-                        newProjectiles.Add(CreateProjectile(projectileTexture));
-                        break;
-                }
-
+            // Check if casting animation is at the right frame to fire
+            if (isCasting && !spellFiredThisCast && currentFrameIndex >= 7)
+            {
+                CreateSpellWithAutoAim(newProjectiles, this.projectileTexture, this.currentEnemies);
+                spellFiredThisCast = true;
                 return true;
             }
 
             return false;
         }
 
-        private Projectile CreateProjectile(Texture2D texture, Vector2? customDirection = null)
+        private Vector2 FindAutoAimTarget(List<Enemy> enemies)
         {
-            // Calculate spawn position (slightly in front of the player)
-            Vector2 spawnOffset = customDirection.HasValue ? customDirection.Value : aimDirection;
-            spawnOffset.Normalize();
-            spawnOffset *= (texture.Width * scale / 2 + 10); // Offset by player radius + small gap
+            if (enemies == null || enemies.Count == 0)
+                return aimDirection; // Default to aim direction if no enemies
 
-            // Create projectile with appropriate properties based on gun type
-            float damage = projectileDamage * DamageModifier;
-            float speed = projectileSpeed;
+            Enemy bestTarget = null;
+            float bestScore = float.MinValue;
 
-            switch (gunType)
+            foreach (var enemy in enemies)
             {
-                case GunType.Shotgun:
-                    damage *= 0.6f; // Less damage per pellet
-                    speed *= 0.9f;  // Slightly slower
-                    break;
-                case GunType.Rifle:
-                    damage *= 0.8f;
-                    speed *= 1.5f;  // Much faster
-                    break;
-                case GunType.Cannon:
-                    damage *= 2.5f; // Much higher damage
-                    speed *= 0.7f;  // Slower
-                    break;
+                if (!enemy.IsActive) continue;
+
+                Vector2 toEnemy = enemy.Position - position;
+                float distance = toEnemy.Length();
+
+                // Skip if too far
+                if (distance > autoAimRange) continue;
+
+                // Normalize for angle calculation
+                toEnemy.Normalize();
+
+                // Calculate angle from aim direction
+                float dotProduct = Vector2.Dot(aimDirection, toEnemy);
+                float angle = (float)Math.Acos(MathHelper.Clamp(dotProduct, -1f, 1f));
+
+                // Skip if outside cone
+                if (angle > autoAimConeAngle / 2) continue;
+
+                // Score based on distance and angle (closer and more centered = better)
+                float score = (1f - (distance / autoAimRange)) * (1f - (angle / (autoAimConeAngle / 2)));
+
+                if (score > bestScore)
+                {
+                    bestScore = score;
+                    bestTarget = enemy;
+                }
             }
 
-            // Use custom direction if provided, otherwise use player's aim direction
-            Vector2 direction = customDirection ?? aimDirection;
+            if (bestTarget != null)
+            {
+                Vector2 targetDirection = bestTarget.Position - position;
+                targetDirection.Normalize();
+                return targetDirection;
+            }
 
-            return new Projectile(
-                position + spawnOffset,
-                direction,
-                damage,
-                speed,
-                color,
-                texture
-            );
+            return aimDirection; // No valid target found
         }
 
-        // Upgrade the player's gun
-        public void UpgradeGun(GunType newGunType)
+        private void CreateSpellWithAutoAim(List<Projectile> projectiles, Texture2D projectileTexture, List<Enemy> enemies)
         {
-            gunType = newGunType;
+            if (projectileTexture == null) return;
 
-            // Update gun properties based on type
-            switch (gunType)
+            Vector2 autoAimDirection = FindAutoAimTarget(enemies);
+
+            // Projectiles spawn directly from character center
+            Vector2 spawnPosition = position;
+
+            float damage = spellDamage * SpellPowerModifier;
+            float speed = spellSpeed;
+
+            switch (wizardType)
             {
-                case GunType.Pistol:
-                    fireRate = 0.5f;
-                    projectileDamage = 1f;
-                    projectileSpeed = 400f;
+                case WizardType.Fire:
+                    projectiles.Add(new Projectile(
+                        spawnPosition,
+                        autoAimDirection,
+                        damage,
+                        speed,
+                        Color.OrangeRed,
+                        projectileTexture
+                    ));
                     break;
 
-                case GunType.Shotgun:
-                    fireRate = 0.8f; // Slower fire rate
-                    projectileDamage = 0.6f; // Less damage per pellet
-                    projectileSpeed = 350f; // Slightly slower
+                case WizardType.Ice:
+                    projectiles.Add(new Projectile(
+                        spawnPosition,
+                        autoAimDirection,
+                        damage,
+                        speed,
+                        Color.LightBlue,
+                        projectileTexture
+                    ));
                     break;
 
-                case GunType.Rifle:
-                    fireRate = 0.2f; // Much faster fire rate
-                    projectileDamage = 0.8f; // Slightly less damage
-                    projectileSpeed = 600f; // Much faster
+                case WizardType.Nature:
+                    projectiles.Add(new Projectile(
+                        spawnPosition,
+                        autoAimDirection,
+                        damage,
+                        speed,
+                        Color.LimeGreen,
+                        projectileTexture
+                    ));
                     break;
 
-                case GunType.Cannon:
-                    fireRate = 1.0f; // Slow fire rate
-                    projectileDamage = 3f; // High damage
-                    projectileSpeed = 300f; // Slower
+                case WizardType.Lightning:
+                    // Lightning shoots multiple projectiles
+                    float baseAngle = (float)Math.Atan2(autoAimDirection.Y, autoAimDirection.X);
+                    for (int i = -1; i <= 1; i++)
+                    {
+                        float angle = baseAngle + (i * 0.3f);
+                        Vector2 direction = new Vector2((float)Math.Cos(angle), (float)Math.Sin(angle));
+                        projectiles.Add(new Projectile(
+                            spawnPosition,
+                            direction,
+                            damage * 0.8f,
+                            speed,
+                            Color.Yellow,
+                            projectileTexture
+                        ));
+                    }
                     break;
             }
         }
 
-        // Upgrade player stats
         public void UpgradeStat(string statType, float amount)
         {
             switch (statType)
             {
-                case "damage":
-                    DamageModifier += amount;
+                case "spellPower":
+                    SpellPowerModifier += amount;
                     break;
                 case "speed":
                     SpeedModifier += amount;
                     break;
-                case "fireRate":
-                    FireRateModifier += amount;
+                case "castSpeed":
+                    CastSpeedModifier += amount;
+                    break;
+                case "mana":
+                    ManaModifier += amount;
+                    maxMana = 100f * ManaModifier;
+                    mana += 20f;
+                    if (mana > maxMana) mana = maxMana;
                     break;
                 case "health":
                     HealthModifier += amount;
                     maxHealth = 10f * HealthModifier;
-                    health += 2f; // Small heal when upgrading health
+                    health += 3f;
                     if (health > maxHealth) health = maxHealth;
                     break;
             }
@@ -299,190 +487,132 @@ namespace SimplifiedGame
 
         public void Draw(SpriteBatch spriteBatch)
         {
-            // Draw with default color
-            Draw(spriteBatch, color);
+            Draw(spriteBatch, Color.White);
         }
 
-        public void Draw(SpriteBatch spriteBatch, Color drawColor)
+        public void Draw(SpriteBatch spriteBatch, Color tintColor)
         {
-            // Draw gun first (so player appears on top of it)
-            DrawGun(spriteBatch, drawColor);
-
-            // Draw the player circle with specified color and rotation
+            // Draw the wizard sprite with current animation frame
             spriteBatch.Draw(
-                texture,
+                wizardTexture,
                 position,
-                null,
-                drawColor,
-                rotation,
-                origin,
-                scale,
-                SpriteEffects.None,
+                currentFrame,
+                tintColor,
+                0f, // No rotation for the character
+                new Vector2(frameWidth / 2, frameHeight / 2),
+                1.0f, // Normal scale since sprites are already 64x64
+                spriteEffect, // Use sprite effect for flipping
                 0
             );
+
+            // No more staff indicator - pure magic auto-aim!
 
             // Draw health bar
             DrawHealthBar(spriteBatch);
+
+            // Draw mana bar
+            DrawManaBar(spriteBatch);
+
+            // Debug: Draw auto-aim cone (uncomment to visualize)
+            /*
+            if (InputManager.IsKeyDown(Keys.F12))
+            {
+                DrawAutoAimCone(spriteBatch);
+            }
+            */
         }
 
-        // Draw the gun as a black rectangle
-        private void DrawGun(SpriteBatch spriteBatch, Color playerColor)
+        private void DrawAutoAimCone(SpriteBatch spriteBatch)
         {
-            // Calculate gun dimensions and position
-            float gunLength = 25;  // Increased gun length for visibility
-            float gunWidth = 10;   // Increased gun width for visibility
-
-            // Calculate gun position - start at player center, move in aim direction
-            Vector2 gunBase = position + direction * (texture.Width * scale * 0.3f);
-
-            // Create a solid black rectangle for the gun body
+            // Debug visualization of auto-aim cone
             Texture2D pixel = new Texture2D(spriteBatch.GraphicsDevice, 1, 1);
             pixel.SetData(new[] { Color.White });
 
-            // Draw the gun as a rotated rectangle
-            spriteBatch.Draw(
-                pixel,  // Use a pixel texture to ensure solid color
-                gunBase,  // Position at the gun base
-                null,  // Use the entire texture
-                Color.Black,  // Black color for gun
-                rotation,  // Rotate to match direction
-                new Vector2(0, 0.5f),  // Origin at middle-left of rectangle
-                new Vector2(gunLength, gunWidth),  // Scale to create gun dimensions
-                SpriteEffects.None,
-                0
-            );
+            float aimAngle = (float)Math.Atan2(aimDirection.Y, aimDirection.X);
+            int lineCount = 20;
 
-            // For gun type visual indicator
-            Color gunTypeColor = Color.White;
-            switch (gunType)
+            for (int i = 0; i <= lineCount; i++)
             {
-                case GunType.Pistol:
-                    gunTypeColor = Color.LightGray;
-                    break;
-                case GunType.Shotgun:
-                    gunTypeColor = Color.Orange;
-                    break;
-                case GunType.Rifle:
-                    gunTypeColor = Color.CornflowerBlue;
-                    break;
-                case GunType.Cannon:
-                    gunTypeColor = Color.Red;
-                    break;
-            }
+                float t = (float)i / lineCount;
+                float angle = aimAngle - autoAimConeAngle / 2 + t * autoAimConeAngle;
+                Vector2 direction = new Vector2((float)Math.Cos(angle), (float)Math.Sin(angle));
+                Vector2 endPoint = position + direction * autoAimRange;
 
-            // Add a colored tip to indicate gun type
-            Vector2 gunTip = position + direction * (texture.Width * scale * 0.3f + gunLength);
-            float tipSize = 6; // Increased size for visibility
-            spriteBatch.Draw(
-                pixel,
-                gunTip,
-                null,
-                gunTypeColor,
-                rotation,
-                new Vector2(0, 0.5f),
-                new Vector2(tipSize, gunWidth + 4), // Slightly larger than gun width
-                SpriteEffects.None,
-                0
-            );
+                // Draw line (simplified - just draw points along the cone edge)
+                for (int j = 0; j < autoAimRange; j += 10)
+                {
+                    Vector2 point = position + direction * j;
+                    spriteBatch.Draw(pixel, new Rectangle((int)point.X, (int)point.Y, 2, 2), Color.Yellow * 0.3f);
+                }
+            }
         }
 
-        // Draw a health bar above the player
         private void DrawHealthBar(SpriteBatch spriteBatch)
         {
             if (!IsAlive) return;
 
-            // Calculate health percentage
             float healthPercentage = health / maxHealth;
+            int healthBarWidth = 24;
+            int healthBarHeight = 4;
 
-            // Health bar dimensions - made wider and taller for visibility
-            int healthBarWidth = (int)(texture.Width * scale);
-            int healthBarHeight = 8; // Increased height for visibility
-
-            // Position above player - moved up slightly for better visibility
             Vector2 barPosition = new Vector2(
                 position.X - healthBarWidth / 2,
-                position.Y - texture.Height * scale / 2 - 20 // Increased offset
+                position.Y - 25
             );
 
-            // Create a solid pixel texture for the health bar
             Texture2D pixel = new Texture2D(spriteBatch.GraphicsDevice, 1, 1);
             pixel.SetData(new[] { Color.White });
 
-            // Draw background (dark red)
+            // Background
             spriteBatch.Draw(
                 pixel,
-                new Rectangle(
-                    (int)barPosition.X,
-                    (int)barPosition.Y,
-                    healthBarWidth,
-                    healthBarHeight
-                ),
-                Color.DarkRed  // Dark red background
+                new Rectangle((int)barPosition.X, (int)barPosition.Y, healthBarWidth, healthBarHeight),
+                Color.DarkRed
             );
 
-            // Draw foreground (green) - representing current health
+            // Foreground
             if (healthPercentage > 0)
             {
                 spriteBatch.Draw(
                     pixel,
-                    new Rectangle(
-                        (int)barPosition.X,
-                        (int)barPosition.Y,
-                        (int)(healthBarWidth * healthPercentage),
-                        healthBarHeight
-                    ),
-                    Color.Green  // Green for health
+                    new Rectangle((int)barPosition.X, (int)barPosition.Y, (int)(healthBarWidth * healthPercentage), healthBarHeight),
+                    Color.Green
                 );
             }
+        }
 
-            // Add a black border around health bar
-            // Top border
-            spriteBatch.Draw(
-                pixel,
-                new Rectangle(
-                    (int)barPosition.X - 1,
-                    (int)barPosition.Y - 1,
-                    healthBarWidth + 2,
-                    1
-                ),
-                Color.Black
+        private void DrawManaBar(SpriteBatch spriteBatch)
+        {
+            if (!IsAlive) return;
+
+            float manaPercentage = mana / maxMana;
+            int manaBarWidth = 24;
+            int manaBarHeight = 3;
+
+            Vector2 barPosition = new Vector2(
+                position.X - manaBarWidth / 2,
+                position.Y - 19
             );
 
-            // Bottom border
+            Texture2D pixel = new Texture2D(spriteBatch.GraphicsDevice, 1, 1);
+            pixel.SetData(new[] { Color.White });
+
+            // Background
             spriteBatch.Draw(
                 pixel,
-                new Rectangle(
-                    (int)barPosition.X - 1,
-                    (int)barPosition.Y + healthBarHeight,
-                    healthBarWidth + 2,
-                    1
-                ),
-                Color.Black
+                new Rectangle((int)barPosition.X, (int)barPosition.Y, manaBarWidth, manaBarHeight),
+                Color.DarkBlue
             );
 
-            // Left border
-            spriteBatch.Draw(
-                pixel,
-                new Rectangle(
-                    (int)barPosition.X - 1,
-                    (int)barPosition.Y,
-                    1,
-                    healthBarHeight
-                ),
-                Color.Black
-            );
-
-            // Right border
-            spriteBatch.Draw(
-                pixel,
-                new Rectangle(
-                    (int)barPosition.X + healthBarWidth,
-                    (int)barPosition.Y,
-                    1,
-                    healthBarHeight
-                ),
-                Color.Black
-            );
+            // Foreground
+            if (manaPercentage > 0)
+            {
+                spriteBatch.Draw(
+                    pixel,
+                    new Rectangle((int)barPosition.X, (int)barPosition.Y, (int)(manaBarWidth * manaPercentage), manaBarHeight),
+                    Color.Blue
+                );
+            }
         }
     }
 }
